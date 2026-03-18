@@ -12,8 +12,7 @@ import logging
 from typing import Any, Dict, List
 
 from langchain.agents import create_agent
-from langchain.tools import tool
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
 
 from config.llm_config import getGeminiLLM  # your existing helper
 
@@ -123,6 +122,11 @@ Write a concise, expert-level system prompt (≤ 200 words) that:
 - Instructs the agent to be methodical and report findings verbatim
 
 Return ONLY the system prompt text, no preamble.
+
+IN CASE OF SQLI, I WANT YOU TO WRITE THIS THAT
+WHEN YOU TRY BASIC PAYLOAD LIKE ' OR 1=1 , and you get server try, dont worry and 
+try different uppercase and lwoercase combination or , Or, oR etc. 
+
 """.strip()
 
     response = llm.invoke([HumanMessage(content=prompt)])
@@ -176,6 +180,85 @@ def _build_subagent(
     )
     logger.info("[Orchestrator] Sub-agent built: %s_specialist", category)
     return agent
+
+
+def _run_subagent_with_streaming(subagent: Any, user_message: str) -> Dict[str, Any]:
+    """
+    Run the sub-agent with streamed updates when available.
+    Falls back to invoke() on older/unsupported runtime combinations.
+    """
+    input_payload = {"messages": [{"role": "user", "content": user_message}]}
+
+    final_messages: List[Any] = []
+    tool_calls: List[Any] = []
+    printed_any_tokens = False
+
+    def _render_chunk(event: Any) -> None:
+        nonlocal printed_any_tokens, final_messages, tool_calls
+
+        if not isinstance(event, dict):
+            return
+
+        event_type = event.get("type")
+        data = event.get("data")
+
+        if event_type == "messages" and isinstance(data, (list, tuple)) and data:
+            token = data[0]
+            if isinstance(token, AIMessageChunk):
+                if token.text:
+                    if not printed_any_tokens:
+                        print("[orchestrator] sub-agent response stream:")
+                        printed_any_tokens = True
+                    print(token.text, end="", flush=True)
+                if token.tool_call_chunks:
+                    for tc in token.tool_call_chunks:
+                        if tc.get("name"):
+                            print(f"\n[orchestrator] tool call chunk: {tc['name']}", flush=True)
+
+        elif event_type == "updates" and isinstance(data, dict):
+            for step_name, step_update in data.items():
+                messages = step_update.get("messages", []) if isinstance(step_update, dict) else []
+                if messages:
+                    final_messages = messages
+                    msg = messages[-1]
+                    if isinstance(msg, AIMessage) and msg.tool_calls:
+                        tool_calls.extend(msg.tool_calls)
+                        for call in msg.tool_calls:
+                            call_name = call.get("name", "unknown_tool") if isinstance(call, dict) else str(call)
+                            print(f"\n[orchestrator] tool requested: {call_name}", flush=True)
+                    if isinstance(msg, ToolMessage):
+                        preview = str(msg.content)
+                        if len(preview) > 200:
+                            preview = preview[:200] + "..."
+                        print(f"\n[orchestrator] tool result ({step_name}): {preview}", flush=True)
+
+    try:
+        for event in subagent.stream(
+            input_payload,
+            stream_mode=["messages", "updates"],
+            version="v2",
+        ):
+            _render_chunk(event)
+    except TypeError:
+        # Backward compatibility with versions that don't support `version`
+        for event in subagent.stream(
+            input_payload,
+            stream_mode=["messages", "updates"],
+        ):
+            _render_chunk(event)
+    except Exception:
+        # Final fallback to non-streaming invocation
+        logger.warning("[Orchestrator] Streaming unavailable, falling back to invoke().")
+        result = subagent.invoke(input_payload)
+        final_messages = result.get("messages", [])
+
+    if printed_any_tokens:
+        print()
+
+    return {
+        "messages": final_messages,
+        "tool_calls": tool_calls,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -250,6 +333,7 @@ def orchestrator_node(state: APEXState) -> Dict[str, Any]:  # noqa: F821
 
     for iteration in range(1, MAX_ITERATIONS + 1):
         logger.info("[Orchestrator] Running sub-agent iteration %d/%d", iteration, MAX_ITERATIONS)
+        print(f"\n[orchestrator] iteration {iteration}/{MAX_ITERATIONS} started", flush=True)
 
         # Build the user message for this iteration, including any prior outputs
         prior_output_summary = (
@@ -265,18 +349,20 @@ def orchestrator_node(state: APEXState) -> Dict[str, Any]:  # noqa: F821
             "and what you tried in detail."
         )
 
-        # Invoke the sub-agent
-        result = subagent.invoke(
-            {"messages": [{"role": "user", "content": user_message}]}
-        )
+        # Streamed sub-agent invocation with fallback to non-streaming mode
+        result = _run_subagent_with_streaming(subagent=subagent, user_message=user_message)
 
         # Extract the final AI message content
-        final_message = result["messages"][-1]
-        output_text: str = (
-            final_message.content
-            if hasattr(final_message, "content")
-            else str(final_message)
-        )
+        final_messages = result.get("messages", [])
+        if not final_messages:
+            output_text = "No response messages returned by sub-agent."
+        else:
+            final_message = final_messages[-1]
+            output_text = (
+                final_message.content
+                if hasattr(final_message, "content")
+                else str(final_message)
+            )
 
         # Store output keyed by category + iteration
         output_key = f"{category}_iter_{iteration}"
@@ -284,11 +370,7 @@ def orchestrator_node(state: APEXState) -> Dict[str, Any]:  # noqa: F821
             "iteration":  iteration,
             "category":   category,
             "output":     output_text,
-            "tool_calls": [
-                msg.tool_calls
-                for msg in result["messages"]
-                if hasattr(msg, "tool_calls") and msg.tool_calls
-            ],
+            "tool_calls": result.get("tool_calls", []),
         }
 
         logger.info("[Orchestrator] Iteration %d complete. Output stored as '%s'.", iteration, output_key)

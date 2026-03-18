@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import logging
 import json
+from typing import Any, Callable, Dict, Optional
 
 from cli import parse_args, validate_inputs, initialize_state, run_interactive_cli
 from graph import app
@@ -17,24 +18,25 @@ logger = logging.getLogger(__name__)
 
 def stream_and_interrupt_handler(
     initial_state: APEXState,
+    progress_callback: Optional[Callable[[str, Dict[str, Any], Dict[str, Any]], None]] = None,
 ) -> APEXState:
     config = {"configurable": {"thread_id": initial_state.target}}
     logger.info(f"Starting engagement for target {initial_state.target}")
 
     try:
-        result = app.invoke(initial_state, config=config)
+        merged_state: Dict[str, Any] = initial_state.model_dump()
+        for chunk in app.stream(initial_state, config=config, stream_mode="updates"):
+            if not isinstance(chunk, dict):
+                continue
 
-        if isinstance(result, APEXState):
-            final_state = result
-        elif isinstance(result, dict):
-            merged = initial_state.model_dump()
-            merged.update(result)
-            final_state = APEXState(**merged)
-        else:
-            logger.warning(
-                "Unexpected graph result type. Falling back to initial state"
-            )
-            final_state = initial_state
+            for node_name, update in chunk.items():
+                if not isinstance(update, dict):
+                    continue
+                merged_state.update(update)
+                if progress_callback:
+                    progress_callback(node_name, update, merged_state)
+
+        final_state = APEXState(**merged_state)
 
         final_state.status = "completed"
         return final_state
@@ -62,14 +64,16 @@ def run_normal(args):
         logger.info(f"Target: {final_state.target}")
         logger.info(f"Status: {final_state.status}")
         logger.info(f"Recon summary: {final_state.recon_summary}")
+        sqli_agent_spec = getattr(final_state, "sqli_agent_spec", {}) or {}
+        sqli_attempt_result = getattr(final_state, "sqli_attempt_result", {}) or {}
         logger.info(
             "Selected SQLi tools: %s",
-            ", ".join(final_state.sqli_agent_spec.get("selected_tools", []))
-            if final_state.sqli_agent_spec
+            ", ".join(sqli_agent_spec.get("selected_tools", []))
+            if sqli_agent_spec
             else "none",
         )
         logger.info(
-            "SQLi attempt result: %s", json.dumps(final_state.sqli_attempt_result)
+            "SQLi attempt result: %s", json.dumps(sqli_attempt_result)
         )
         logger.info("=" * 60)
         return 0

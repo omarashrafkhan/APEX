@@ -9,8 +9,8 @@ load_dotenv(dotenv_path=env_path)
 
 def getGeminiLLM():
     return ChatGoogleGenerativeAI(
-        model="gemini-2.5-flash-lite",
-        temperature=0.1,
+        model="gemini-2.5-flash",
+        temperature=0,
         google_api_key=os.getenv("VERTEX_API_KEY_OMAR")
     )
 

@@ -116,25 +116,39 @@ def run_interactive_cli(runner_fn):
         validate_inputs(args)
         initial_state = initialize_state(args)
 
-        # Show spinner while graph runs
-        with Live(Text("  ⠋  Running agents...", style="cyan"), refresh_per_second=10):
-            final_state = runner_fn(initial_state)
+        # Show spinner while graph runs and update status from streamed node updates
+        status_text = Text("  ⠋  Running agents...", style="cyan")
+
+        with Live(status_text, refresh_per_second=10) as live:
+            def _on_progress(node_name: str, update: dict, merged_state: dict) -> None:
+                status = merged_state.get("status") or "running"
+                outputs = merged_state.get("subagent_outputs") or {}
+                iter_count = len(outputs)
+                live.update(Text(
+                    f"  ⠋  Running agents... node={node_name} status={status} iterations={iter_count}",
+                    style="cyan",
+                ))
+
+            final_state = runner_fn(initial_state, progress_callback=_on_progress)
 
         # Print results
+        sqli_agent_spec = getattr(final_state, "sqli_agent_spec", {}) or {}
+        sqli_attempt_result = getattr(final_state, "sqli_attempt_result", {}) or {}
+
         console.print()
         console.print(Panel(
             f"[dim]Status:[/dim]       [green]{final_state.status}[/green]\n"
             f"[dim]Recon summary:[/dim] {final_state.recon_summary or '[dim]none[/dim]'}\n"
             f"[dim]SQLi tools:[/dim]   "
-            + (", ".join(final_state.sqli_agent_spec.get("selected_tools", [])) or "[dim]none[/dim]"),
+            + (", ".join(sqli_agent_spec.get("selected_tools", [])) or "[dim]none[/dim]"),
             title="[green]✔ Engagement Complete[/green]",
             border_style="green",
             padding=(0, 2),
         ))
 
         report_text = (
-            final_state.sqli_attempt_result.get("report")
-            or final_state.sqli_attempt_result.get("orchestrator_report")
+            sqli_attempt_result.get("report")
+            or sqli_attempt_result.get("orchestrator_report")
             or ""
         )
         if report_text:
@@ -142,6 +156,19 @@ def run_interactive_cli(runner_fn):
             console.print(Panel(
                 report_text,
                 title="[cyan]Orchestrator Report[/cyan]",
+                border_style="cyan",
+                padding=(0, 2),
+            ))
+
+        if final_state.subagent_outputs:
+            latest_key = sorted(final_state.subagent_outputs.keys())[-1]
+            latest_output = final_state.subagent_outputs.get(latest_key, {})
+            latest_text = latest_output.get("output", "") if isinstance(latest_output, dict) else str(latest_output)
+            preview = latest_text[:1600] + ("..." if len(latest_text) > 1600 else "")
+            console.print()
+            console.print(Panel(
+                preview or "No sub-agent output text was captured.",
+                title=f"[cyan]Latest Sub-Agent Output ({latest_key})[/cyan]",
                 border_style="cyan",
                 padding=(0, 2),
             ))
