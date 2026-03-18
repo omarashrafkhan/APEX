@@ -6,7 +6,7 @@ import json
 
 from cli import parse_args, validate_inputs, initialize_state, run_interactive_cli
 from graph import app
-from state import PenetrationTestingState
+from state import APEXState
 
 logging.basicConfig(
     level=logging.INFO,
@@ -16,20 +16,20 @@ logger = logging.getLogger(__name__)
 
 
 def stream_and_interrupt_handler(
-    initial_state: PenetrationTestingState,
-) -> PenetrationTestingState:
+    initial_state: APEXState,
+) -> APEXState:
     config = {"configurable": {"thread_id": initial_state.target}}
     logger.info(f"Starting engagement for target {initial_state.target}")
 
     try:
         result = app.invoke(initial_state, config=config)
 
-        if isinstance(result, PenetrationTestingState):
+        if isinstance(result, APEXState):
             final_state = result
         elif isinstance(result, dict):
             merged = initial_state.model_dump()
             merged.update(result)
-            final_state = PenetrationTestingState(**merged)
+            final_state = APEXState(**merged)
         else:
             logger.warning(
                 "Unexpected graph result type. Falling back to initial state"

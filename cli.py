@@ -8,7 +8,7 @@ from rich.live import Live
 from prompt_toolkit import prompt
 from prompt_toolkit.styles import Style
 
-from state import PenetrationTestingState
+from state import APEXState
 
 console = Console()
 
@@ -35,8 +35,8 @@ def validate_inputs(args: argparse.Namespace) -> None:
         raise ValueError("Target must be a non-empty URL/IP/identifier string")
 
 
-def initialize_state(args: argparse.Namespace) -> PenetrationTestingState:
-    return PenetrationTestingState(
+def initialize_state(args: argparse.Namespace) -> APEXState:
+    return APEXState(
         initial_prompt=args.prompt,
         target=args.target,
         target_ip=args.target,

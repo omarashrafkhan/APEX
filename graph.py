@@ -2,14 +2,14 @@ from __future__ import annotations
 
 from langgraph.graph import StateGraph, END
 
-from state import PenetrationTestingState
+from state import APEXState
 from nodes.orchestrator import orchestrator_node
 from nodes.recon import recon_node
 from nodes.end_node import end_node
 
 
 def build_graph():
-	graph = StateGraph(PenetrationTestingState)
+	graph = StateGraph(APEXState)
 
 	# Minimal deterministic flow:
 	# 1) recon collects data from target
