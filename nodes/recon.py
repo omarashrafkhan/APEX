@@ -17,12 +17,26 @@ except ModuleNotFoundError:
 
 
 def _normalize_target(target: str) -> Dict[str, Any]:
-    target_to_parse = target if "://" in target else f"http://{target}"
+    target = (target or "").strip()
+
+    if "://" in target:
+        target_to_parse = target
+    elif target.startswith(("http:", "https:")):
+        scheme, rest = target.split(":", 1)
+        target_to_parse = f"{scheme}://{rest.lstrip('/')}"
+    else:
+        target_to_parse = f"http://{target}"
+
     parsed = urlparse(target_to_parse)
     host = parsed.hostname or target
     scheme = parsed.scheme or "http"
     path = parsed.path or "/"
-    port = parsed.port
+
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+
     return {"host": host, "scheme": scheme, "path": path, "port": port}
 
 
@@ -85,7 +99,6 @@ if __name__ == "__main__":
     dummy_state = APEXState(
         initial_prompt="Test recon node",
         target="http://127.0.0.1:8000",
-        target_ip="127.0.0.1",
         exploit_enabled=False,
         status="running",
     )

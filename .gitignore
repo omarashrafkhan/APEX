@@ -1,1 +1,45 @@
+# Environment variables - DO NOT commit
+.env
+
+# Python cache
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# IDE
+.idea/
+*.swp
+*.swo
+
+# Logs
+logs/
+*.log
+
+# Reports
+reports/
+
+# Database
+*.db
+*.sqlite
+checkpoints.db
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Legacy cache
+modal-llm/__pycache__/baronllm-14b-ollama-server.cpython-313.pyc
+modal-llm/__pycache__/my-vllm-server-barren.cpython-313.pyc
+modal-llm/__pycache__/my-vllm-server-SecGPT.cpython-313.pyc
+modal-llm/__pycache__/my-vllm-server.cpython-313.pyc
+**/**.pyc
+
+# Paper
 paper.pdf

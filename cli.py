@@ -39,7 +39,6 @@ def initialize_state(args: argparse.Namespace) -> APEXState:
     return APEXState(
         initial_prompt=args.prompt,
         target=args.target,
-        target_ip=args.target,
         exploit_enabled=False,
         status="running",
         orchestrator_plan={},
@@ -132,6 +131,20 @@ def run_interactive_cli(runner_fn):
             border_style="green",
             padding=(0, 2),
         ))
+
+        report_text = (
+            final_state.sqli_attempt_result.get("report")
+            or final_state.sqli_attempt_result.get("orchestrator_report")
+            or ""
+        )
+        if report_text:
+            console.print()
+            console.print(Panel(
+                report_text,
+                title="[cyan]Orchestrator Report[/cyan]",
+                border_style="cyan",
+                padding=(0, 2),
+            ))
 
     except KeyboardInterrupt:
         console.print("\n\n  [yellow]Aborted by user.[/yellow]")
