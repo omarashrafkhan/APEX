@@ -396,7 +396,6 @@ def run_omar_crawler(target_url: str):
         sanitized_requests.append(sanitized_req)
 
     return {
-        "output_file": temp_file_path,
         "pages_visited": len(crawler.visited_urls),
         "requests_captured": len(all_requests),
         "captured_requests": sanitized_requests,
