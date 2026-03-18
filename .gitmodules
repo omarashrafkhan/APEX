@@ -1,0 +1,3 @@
+[submodule "xbow-benchmarks"]
+	path = xbow-benchmarks
+	url = https://github.com/xbow-engineering/validation-benchmarks.git
