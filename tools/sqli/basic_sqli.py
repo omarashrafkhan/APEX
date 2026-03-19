@@ -14,7 +14,7 @@ def http_sqli_probe(
     content_type: str = "form",
 ) -> str:
     """
-    Fire a single HTTP request with an SQLi payload injected into a parameter.
+    Fire HTTP request(s) with an SQLi payload injected into a parameter.
     Returns full response content and metadata for analysis.
 
     Args:
@@ -23,7 +23,7 @@ def http_sqli_probe(
         body: Base parameter dictionary.
         param: Optional parameter name to inject.
         payload: Optional payload value to inject into `param`.
-        content_type: For POST, either "form" (default) or "json".
+        content_type: For POST, one of "form" (default), "json", or "both".
     """
     import requests
 
@@ -32,22 +32,24 @@ def http_sqli_probe(
         injected_body[param] = payload
 
     method_upper = method.upper()
-    is_json_post = method_upper == "POST" and content_type.lower() == "json"
+    content_type_lower = content_type.lower()
 
-    headers = {}
-    if method_upper == "POST":
-        headers["Content-Type"] = "application/json" if is_json_post else "application/x-www-form-urlencoded"
-
-    try:
+    def _send_request(post_mode: str = "form") -> Dict[str, Any]:
+        headers = {}
         if method_upper == "POST":
-            if is_json_post:
-                resp = requests.post(url, json=injected_body, headers=headers, timeout=8)
-            else:
-                resp = requests.post(url, data=injected_body, headers=headers, timeout=8)
-        else:
-            resp = requests.get(url, params=injected_body, timeout=8)
+            headers["Content-Type"] = (
+                "application/json" if post_mode == "json" else "application/x-www-form-urlencoded"
+            )
 
-        return json.dumps({
+        if method_upper == "POST":
+            if post_mode == "json":
+                resp = requests.post(url, json=injected_body, headers=headers, timeout=30)
+            else:
+                resp = requests.post(url, data=injected_body, headers=headers, timeout=30)
+        else:
+            resp = requests.get(url, params=injected_body, timeout=30)
+
+        return {
             "url": url,
             "method": method_upper,
             "param": param,
@@ -58,7 +60,24 @@ def http_sqli_probe(
             "request_content_type": headers.get("Content-Type"),
             "response_headers": dict(resp.headers),
             "response_text": resp.text,
-        })
+        }
+
+    try:
+        if method_upper == "POST" and content_type_lower == "both":
+            form_result = _send_request(post_mode="form")
+            json_result = _send_request(post_mode="json")
+            return json.dumps(
+                {
+                    "mode": "both",
+                    "results": {
+                        "form": form_result,
+                        "json": json_result,
+                    },
+                }
+            )
+
+        post_mode = "json" if (method_upper == "POST" and content_type_lower == "json") else "form"
+        return json.dumps(_send_request(post_mode=post_mode))
     except Exception as e:
         return json.dumps({"error": str(e)})
 
@@ -73,25 +92,30 @@ def baseline_request(
     """
     Fire a clean baseline request to record normal response for delta comparison.
     For POST requests, defaults to form encoding (works with PHP $_POST).
+    Set content_type to "both" to test form and json in one call.
+    Because some servers handle form and json differently, this can help identify which one to target for SQLi.
     """
     import requests
 
     method_upper = method.upper()
-    is_json_post = method_upper == "POST" and content_type.lower() == "json"
+    content_type_lower = content_type.lower()
 
-    headers = {}
-    if method_upper == "POST":
-        headers["Content-Type"] = "application/json" if is_json_post else "application/x-www-form-urlencoded"
-
-    try:
+    def _send_request(post_mode: str = "form") -> Dict[str, Any]:
+        headers = {}
         if method_upper == "POST":
-            if is_json_post:
-                resp = requests.post(url, json=body, headers=headers, timeout=8)
+            headers["Content-Type"] = (
+                "application/json" if post_mode == "json" else "application/x-www-form-urlencoded"
+            )
+
+        if method_upper == "POST":
+            if post_mode == "json":
+                resp = requests.post(url, json=body, headers=headers, timeout=30)
             else:
-                resp = requests.post(url, data=body, headers=headers, timeout=8)
+                resp = requests.post(url, data=body, headers=headers, timeout=30)
         else:
-            resp = requests.get(url, params=body, timeout=8)
-        return json.dumps({
+            resp = requests.get(url, params=body, timeout=30)
+
+        return {
             "url": url,
             "method": method_upper,
             "status": resp.status_code,
@@ -100,6 +124,23 @@ def baseline_request(
             "request_content_type": headers.get("Content-Type"),
             "response_headers": dict(resp.headers),
             "response_text": resp.text,
-        })
+        }
+
+    try:
+        if method_upper == "POST" and content_type_lower == "both":
+            form_result = _send_request(post_mode="form")
+            json_result = _send_request(post_mode="json")
+            return json.dumps(
+                {
+                    "mode": "both",
+                    "results": {
+                        "form": form_result,
+                        "json": json_result,
+                    },
+                }
+            )
+
+        post_mode = "json" if (method_upper == "POST" and content_type_lower == "json") else "form"
+        return json.dumps(_send_request(post_mode=post_mode))
     except Exception as e:
         return json.dumps({"error": str(e)})

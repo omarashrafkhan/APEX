@@ -114,7 +114,13 @@ Return ONLY the system prompt text, no preamble.
 
 IN CASE OF SQLI, I WANT YOU TO WRITE THIS THAT
 WHEN YOU TRY BASIC PAYLOAD LIKE ' OR 1=1 , and you get server try, dont worry and
-try different uppercase and lowercase combination or , Or, oR etc.
+try different uppercase and lowercase combination or , Or, oR etc. YOU MUST TRY ALL POSSIBLE COMBINATION OF CASES. 
+SOME SERVERS ARE CASE SENSITIVE AND THIS CAN HELP BYPASSING WAF.
+
+Alwasy start from the simplest payloads and then move to more complex ones. Dont forget to use the 
+baseline request tool to understand the normal response before injecting payloads.
+SQL Map takes a lot of time to run, so use it only when you have strong evidence of SQLi and have exhausted majority of
+the simpler techniques.
 """.strip()
 
     ui.llm_prompt(prompt_text, agent_name="OrchestratorAgent")
