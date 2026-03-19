@@ -18,6 +18,7 @@ from config.llm_config import getGeminiLLM  # your existing helper
 
 from state import APEXState
 from tools.sqli.basic_sqli import http_sqli_probe, baseline_request  # example tools
+from tools.sqli.sqlmap_runner import run_sqlmap  # example tool
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +47,7 @@ Tone: precise, methodical, adversarial — think like a senior red-team operator
 # ---------------------------------------------------------------------------
 
 TOOL_REGISTRY: Dict[str, List[Any]] = {
-    "sqli":        [http_sqli_probe, baseline_request],   # e.g. [run_sqlmap, manual_sqli_probe]
+    "sqli":        [http_sqli_probe, baseline_request, run_sqlmap],   # e.g. [run_sqlmap, manual_sqli_probe]
 }
 
 # ---------------------------------------------------------------------------
@@ -227,10 +228,7 @@ def _run_subagent_with_streaming(subagent: Any, user_message: str) -> Dict[str, 
                             call_name = call.get("name", "unknown_tool") if isinstance(call, dict) else str(call)
                             print(f"\n[orchestrator] tool requested: {call_name}", flush=True)
                     if isinstance(msg, ToolMessage):
-                        preview = str(msg.content)
-                        if len(preview) > 200:
-                            preview = preview[:200] + "..."
-                        print(f"\n[orchestrator] tool result ({step_name}): {preview}", flush=True)
+                        print(f"\n[orchestrator] tool result ({step_name}): {msg.content}", flush=True)
 
     try:
         for event in subagent.stream(
@@ -358,11 +356,8 @@ def orchestrator_node(state: APEXState) -> Dict[str, Any]:  # noqa: F821
             output_text = "No response messages returned by sub-agent."
         else:
             final_message = final_messages[-1]
-            output_text = (
-                final_message.content
-                if hasattr(final_message, "content")
-                else str(final_message)
-            )
+            raw_content = final_message.content if hasattr(final_message, "content") else final_message
+            output_text = _coerce_to_text(raw_content)
 
         # Store output keyed by category + iteration
         output_key = f"{category}_iter_{iteration}"
@@ -400,7 +395,40 @@ def orchestrator_node(state: APEXState) -> Dict[str, Any]:  # noqa: F821
 # Utility — basic flag detection  (expand / replace as needed)
 # ---------------------------------------------------------------------------
 
-def _check_flag_captured(output: str) -> bool:
+def _coerce_to_text(value: Any) -> str:
+    """
+    Convert model/tool outputs into a plain text string.
+    Handles content-block lists produced by some chat models.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    if isinstance(value, list):
+        parts: List[str] = []
+        for item in value:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str) and text:
+                    parts.append(text)
+                else:
+                    parts.append(json.dumps(item, ensure_ascii=False))
+            else:
+                parts.append(str(item))
+        return "\n".join(part for part in parts if part)
+    if isinstance(value, dict):
+        text = value.get("text") if "text" in value else None
+        if isinstance(text, str):
+            return text
+        return json.dumps(value, ensure_ascii=False)
+    return str(value)
+
+
+def _check_flag_captured(output: Any) -> bool:
     """
     Returns True if the output looks like a flag was found.
     Common CTF flag formats: FLAG{...}, HTB{...}, picoCTF{...}, etc.
@@ -413,7 +441,8 @@ def _check_flag_captured(output: str) -> bool:
         r"CTF\{[^}]+\}",
         r"flag\{[^}]+\}",
     ]
+    output_text = _coerce_to_text(output)
     for pattern in flag_patterns:
-        if re.search(pattern, output, re.IGNORECASE):
+        if re.search(pattern, output_text, re.IGNORECASE):
             return True
     return False
