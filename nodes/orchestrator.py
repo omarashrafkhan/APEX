@@ -9,22 +9,23 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any, Dict, List
 
 from langchain.agents import create_agent
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
 
-from config.llm_config import getGeminiLLM  # your existing helper
+from config.llm_config import getGeminiLLM
 
 from state import APEXState
-from tools.sqli.basic_sqli import http_sqli_probe, baseline_request  # example tools
-from tools.sqli.sqlmap_runner import run_sqlmap  # example tool
+from tools.sqli.basic_sqli import http_sqli_probe, baseline_request
+from tools.sqli.sqlmap_runner import run_sqlmap
+from ui import ui
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Orchestrator system prompt
-# ---------------------------------------------------------------------------
+
+# ─── Orchestrator system prompt ───────────────────────────────────────────────
 
 ORCHESTRATOR_SYSTEM_PROMPT = """
 You are APEX Orchestrator — the master intelligence of an autonomous penetration-testing framework.
@@ -38,34 +39,27 @@ Your responsibilities:
 Supported pentest categories (you MUST pick exactly one):
   - sqli          (SQL Injection)
 
-
 Tone: precise, methodical, adversarial — think like a senior red-team operator.
 """.strip()
 
-# ---------------------------------------------------------------------------
-# Hardcoded tool registry  (populate these lists with your real tools)
-# ---------------------------------------------------------------------------
+
+# ─── Tool registry ────────────────────────────────────────────────────────────
 
 TOOL_REGISTRY: Dict[str, List[Any]] = {
-    "sqli":        [http_sqli_probe, baseline_request, run_sqlmap],   # e.g. [run_sqlmap, manual_sqli_probe]
+    "sqli": [http_sqli_probe, baseline_request, run_sqlmap],
 }
 
-# ---------------------------------------------------------------------------
-# Helper 1 — derive pentest category via LLM
-# ---------------------------------------------------------------------------
+
+# ─── Helper 1 — determine pentest category ───────────────────────────────────
 
 def _determine_pentest_category(
     initial_prompt: str,
     recon_summary: str,
     recon_results: Dict[str, Any],
 ) -> str:
-    """
-    Uses the orchestrator LLM to pick one category from TOOL_REGISTRY keys.
-    Returns a lowercase string like 'sqli'.
-    """
     llm = getGeminiLLM()
 
-    prompt = f"""
+    prompt_text = f"""
 You are a senior penetration tester. Based on the information below, choose the
 single most appropriate pentest category from this list:
 {list(TOOL_REGISTRY.keys())}
@@ -82,34 +76,28 @@ Respond with ONLY the category string and nothing else.
 {json.dumps(recon_results, indent=2)}
 """.strip()
 
-    response = llm.invoke([HumanMessage(content=prompt)])
+    ui.llm_prompt(prompt_text, agent_name="OrchestratorAgent")
+    response = llm.invoke([HumanMessage(content=prompt_text)])
     category = response.content.strip().lower()
+    ui.llm_response(response.content, agent_name="OrchestratorAgent")
 
     if category not in TOOL_REGISTRY:
-        logger.warning("LLM returned unknown category '%s', falling back to sqli", category)
+        ui.warn(f"LLM returned unknown category '{category}', falling back to sqli")
         category = "sqli"
 
-    logger.info("[Orchestrator] Pentest category determined: %s", category)
+    ui.kv("Pentest category", category)
     return category
 
 
-# ---------------------------------------------------------------------------
-# Helper 2 — create specialised sub-agent system prompt via LLM
-# ---------------------------------------------------------------------------
-
-# TODO: Based on categry merge expert hardcoded prompt 
+# ─── Helper 2 — create specialised sub-agent prompt ──────────────────────────
 
 def _create_specialized_prompt(
     category: str,
     context: Dict[str, Any],
 ) -> str:
-    """
-    Given the pentest category and relevant context, asks the LLM to write a
-    targeted system prompt for the sub-agent.
-    """
     llm = getGeminiLLM()
 
-    prompt = f"""
+    prompt_text = f"""
 You are writing a system prompt for a specialised penetration-testing sub-agent.
 
 Category : {category}
@@ -125,111 +113,114 @@ Write a concise, expert-level system prompt (≤ 200 words) that:
 Return ONLY the system prompt text, no preamble.
 
 IN CASE OF SQLI, I WANT YOU TO WRITE THIS THAT
-WHEN YOU TRY BASIC PAYLOAD LIKE ' OR 1=1 , and you get server try, dont worry and 
-try different uppercase and lwoercase combination or , Or, oR etc. 
-
+WHEN YOU TRY BASIC PAYLOAD LIKE ' OR 1=1 , and you get server try, dont worry and
+try different uppercase and lowercase combination or , Or, oR etc.
 """.strip()
 
-    response = llm.invoke([HumanMessage(content=prompt)])
+    ui.llm_prompt(prompt_text, agent_name="OrchestratorAgent")
+    response = llm.invoke([HumanMessage(content=prompt_text)])
     specialized_prompt = response.content.strip()
-    logger.info("[Orchestrator] Specialised prompt created for category: %s", category)
+    ui.llm_response(specialized_prompt, agent_name="OrchestratorAgent")
+
     return specialized_prompt
 
 
-# ---------------------------------------------------------------------------
-# Helper 3 — select tools for the sub-agent via LLM
-# ---------------------------------------------------------------------------
+# ─── Helper 3 — select tools ─────────────────────────────────────────────────
 
 def _select_tools_for_subagent(
     category: str,
     specialized_prompt: str,
 ) -> List[Any]:
-    """
-    Uses the specialised system prompt to choose the best subset of tools
-    from the category's tool pool.  For now it returns all tools in the
-    category; swap for LLM-driven selection when your tool list grows.
-    """
     available_tools = TOOL_REGISTRY.get(category, [])
 
     if not available_tools:
-        logger.warning("[Orchestrator] No tools registered for category '%s'.", category)
+        ui.warn(f"No tools registered for category '{category}'.")
         return []
 
-    # TODO: when tool list is large, add an LLM call here that receives
-    #       `specialized_prompt` + tool descriptions and returns a subset.
+    tool_names = [getattr(t, "name", str(t)) for t in available_tools]
+    ui.kv("Tools selected", ", ".join(tool_names))
     return available_tools
 
 
-# ---------------------------------------------------------------------------
-# Helper 4 — build the sub-agent using create_agent (modern API)
-# ---------------------------------------------------------------------------
+# ─── Helper 4 — build sub-agent ──────────────────────────────────────────────
 
 def _build_subagent(
     specialized_prompt: str,
     tools: List[Any],
     category: str,
 ) -> Any:
-    """
-    Constructs a LangChain agent using create_agent.
-    The agent name is derived from the category for clean graph node naming.
-    """
     agent = create_agent(
-        model=getGeminiLLM(),           # can swap per-category if needed
+        model=getGeminiLLM(),
         tools=tools,
         system_prompt=specialized_prompt,
-        name=f"{category}_specialist",  # snake_case — safe across all providers
+        name=f"{category}_specialist",
     )
-    logger.info("[Orchestrator] Sub-agent built: %s_specialist", category)
+    ui.info(f"Sub-agent built: {category}_specialist")
     return agent
 
 
+# ─── Helper 5 — run sub-agent with streaming ─────────────────────────────────
+
 def _run_subagent_with_streaming(subagent: Any, user_message: str) -> Dict[str, Any]:
-    """
-    Run the sub-agent with streamed updates when available.
-    Falls back to invoke() on older/unsupported runtime combinations.
-    """
     input_payload = {"messages": [{"role": "user", "content": user_message}]}
 
     final_messages: List[Any] = []
-    tool_calls: List[Any] = []
-    printed_any_tokens = False
+    tool_calls: List[Any]     = []
+    response_buffer: List[str] = []
 
     def _render_chunk(event: Any) -> None:
-        nonlocal printed_any_tokens, final_messages, tool_calls
+        nonlocal final_messages, tool_calls, response_buffer
 
         if not isinstance(event, dict):
             return
 
         event_type = event.get("type")
-        data = event.get("data")
+        data       = event.get("data")
 
         if event_type == "messages" and isinstance(data, (list, tuple)) and data:
             token = data[0]
             if isinstance(token, AIMessageChunk):
                 if token.text:
-                    if not printed_any_tokens:
-                        print("[orchestrator] sub-agent response stream:")
-                        printed_any_tokens = True
-                    print(token.text, end="", flush=True)
+                    response_buffer.append(token.text)
                 if token.tool_call_chunks:
                     for tc in token.tool_call_chunks:
                         if tc.get("name"):
-                            print(f"\n[orchestrator] tool call chunk: {tc['name']}", flush=True)
+                            ui.tool_call(tc["name"], agent_name=subagent.name)
 
         elif event_type == "updates" and isinstance(data, dict):
             for step_name, step_update in data.items():
-                messages = step_update.get("messages", []) if isinstance(step_update, dict) else []
+                messages = (
+                    step_update.get("messages", [])
+                    if isinstance(step_update, dict)
+                    else []
+                )
                 if messages:
                     final_messages = messages
                     msg = messages[-1]
+
                     if isinstance(msg, AIMessage) and msg.tool_calls:
                         tool_calls.extend(msg.tool_calls)
                         for call in msg.tool_calls:
-                            call_name = call.get("name", "unknown_tool") if isinstance(call, dict) else str(call)
-                            print(f"\n[orchestrator] tool requested: {call_name}", flush=True)
-                    if isinstance(msg, ToolMessage):
-                        print(f"\n[orchestrator] tool result ({step_name}): {msg.content}", flush=True)
+                            call_name = (
+                                call.get("name", "unknown_tool")
+                                if isinstance(call, dict)
+                                else str(call)
+                            )
+                            call_args = (
+                                call.get("args", {})
+                                if isinstance(call, dict)
+                                else {}
+                            )
+                            ui.tool_call(call_name, call_args, agent_name=subagent.name)
 
+                    if isinstance(msg, ToolMessage):
+                        ui.tool_result(
+                            step_name,
+                            str(msg.content),
+                            agent_name=subagent.name,
+                        )
+
+    # ── Stream ────────────────────────────────────────────────────────────────
     try:
         for event in subagent.stream(
             input_payload,
@@ -238,60 +229,48 @@ def _run_subagent_with_streaming(subagent: Any, user_message: str) -> Dict[str, 
         ):
             _render_chunk(event)
     except TypeError:
-        # Backward compatibility with versions that don't support `version`
         for event in subagent.stream(
             input_payload,
             stream_mode=["messages", "updates"],
         ):
             _render_chunk(event)
     except Exception:
-        # Final fallback to non-streaming invocation
-        logger.warning("[Orchestrator] Streaming unavailable, falling back to invoke().")
+        ui.warn("Streaming unavailable — falling back to invoke().")
         result = subagent.invoke(input_payload)
         final_messages = result.get("messages", [])
 
-    if printed_any_tokens:
-        print()
+    # Flush buffered streaming tokens as a single LLM-response panel
+    if response_buffer:
+        ui.llm_response("".join(response_buffer), agent_name=subagent.name)
 
     return {
-        "messages": final_messages,
+        "messages":   final_messages,
         "tool_calls": tool_calls,
     }
 
 
-# ---------------------------------------------------------------------------
-# Main orchestrator node
-# ---------------------------------------------------------------------------
+# ─── Main orchestrator node ───────────────────────────────────────────────────
 
-def orchestrator_node(state: APEXState) -> Dict[str, Any]:  # noqa: F821
+def orchestrator_node(state: APEXState) -> Dict[str, Any]:
     """
     LangGraph node — orchestrates specialised sub-agents to achieve the pentest goal.
 
-    Reads:
-        state.initial_prompt
-        state.target
-        state.recon_results
-        state.recon_summary
-
-    Writes:
-        state.subagent_outputs   (dict keyed by category + iteration index)
-        state.status
+    Reads  : state.initial_prompt, state.target, state.recon_results, state.recon_summary
+    Writes : state.subagent_outputs, state.status
     """
 
-    logger.info("[Orchestrator] Node started. Target: %s", state.target)
+    ui.agent_start("OrchestratorAgent", goal=state.initial_prompt)
+    ui.kv("Target", state.target)
 
-    # ------------------------------------------------------------------
-    # 1. Determine the pentest category
-    # ------------------------------------------------------------------
+    # 1. Determine category
+    ui.agent_thinking("OrchestratorAgent", "Determining pentest category…")
     category = _determine_pentest_category(
         initial_prompt=state.initial_prompt,
         recon_summary=state.recon_summary,
         recon_results=state.recon_results,
     )
 
-    # ------------------------------------------------------------------
-    # 2. Build context dict for prompt + tool selection
-    # ------------------------------------------------------------------
+    # 2. Build context
     context: Dict[str, Any] = {
         "target":         state.target,
         "initial_prompt": state.initial_prompt,
@@ -300,40 +279,39 @@ def orchestrator_node(state: APEXState) -> Dict[str, Any]:  # noqa: F821
         "category":       category,
     }
 
-    # ------------------------------------------------------------------
     # 3. Generate specialised system prompt
-    # ------------------------------------------------------------------
+    ui.agent_thinking("OrchestratorAgent", "Generating specialised system prompt…")
     specialized_prompt = _create_specialized_prompt(category=category, context=context)
 
-    # ------------------------------------------------------------------
     # 4. Select tools
-    # ------------------------------------------------------------------
     tools = _select_tools_for_subagent(
         category=category,
         specialized_prompt=specialized_prompt,
     )
 
-    # ------------------------------------------------------------------
-    # 5. Build the sub-agent (modern create_agent API)
-    # ------------------------------------------------------------------
+    # 5. Build sub-agent
     subagent = _build_subagent(
         specialized_prompt=specialized_prompt,
         tools=tools,
         category=category,
     )
 
-    # ------------------------------------------------------------------
-    # 6. Run the sub-agent in an iteration loop (max 3 iterations)
-    # ------------------------------------------------------------------
+    # 6. Iteration loop
     MAX_ITERATIONS = 3
-    subagent_outputs: Dict[str, Any] = dict(state.subagent_outputs)  # copy existing
+    subagent_outputs: Dict[str, Any] = dict(state.subagent_outputs)
     flag_captured = False
 
     for iteration in range(1, MAX_ITERATIONS + 1):
-        logger.info("[Orchestrator] Running sub-agent iteration %d/%d", iteration, MAX_ITERATIONS)
-        print(f"\n[orchestrator] iteration {iteration}/{MAX_ITERATIONS} started", flush=True)
+        ui.agent_switch(
+            "OrchestratorAgent",
+            f"{category}_specialist",
+            reason=f"iteration {iteration}/{MAX_ITERATIONS}",
+        )
+        ui.agent_start(
+            f"{category}_specialist",
+            goal=f"Iteration {iteration}/{MAX_ITERATIONS} — {state.initial_prompt}",
+        )
 
-        # Build the user message for this iteration, including any prior outputs
         prior_output_summary = (
             json.dumps(subagent_outputs, indent=2) if subagent_outputs else "None yet."
         )
@@ -347,19 +325,21 @@ def orchestrator_node(state: APEXState) -> Dict[str, Any]:  # noqa: F821
             "and what you tried in detail."
         )
 
-        # Streamed sub-agent invocation with fallback to non-streaming mode
         result = _run_subagent_with_streaming(subagent=subagent, user_message=user_message)
 
-        # Extract the final AI message content
+        # Extract final message text
         final_messages = result.get("messages", [])
         if not final_messages:
             output_text = "No response messages returned by sub-agent."
         else:
             final_message = final_messages[-1]
-            raw_content = final_message.content if hasattr(final_message, "content") else final_message
+            raw_content   = (
+                final_message.content
+                if hasattr(final_message, "content")
+                else final_message
+            )
             output_text = _coerce_to_text(raw_content)
 
-        # Store output keyed by category + iteration
         output_key = f"{category}_iter_{iteration}"
         subagent_outputs[output_key] = {
             "iteration":  iteration,
@@ -368,38 +348,34 @@ def orchestrator_node(state: APEXState) -> Dict[str, Any]:  # noqa: F821
             "tool_calls": result.get("tool_calls", []),
         }
 
-        logger.info("[Orchestrator] Iteration %d complete. Output stored as '%s'.", iteration, output_key)
+        ui.agent_done(
+            f"{category}_specialist",
+            summary=f"Iteration {iteration} stored as '{output_key}'",
+        )
 
-        # ------------------------------------------------------------------
-        # 7. Check whether the flag has been captured (simple heuristic;
-        #    replace with a proper LLM-based judge if needed)
-        # ------------------------------------------------------------------
+        # 7. Check flag
         if _check_flag_captured(output_text):
-            logger.info("[Orchestrator] Flag captured on iteration %d!", iteration)
+            ui.success(f"🚩  Flag captured on iteration {iteration}!")
             flag_captured = True
             break
+        else:
+            ui.info(f"No flag detected in iteration {iteration} output.")
 
-    # ------------------------------------------------------------------
-    # 8. Return state updates
-    # ------------------------------------------------------------------
+    # Hand back to orchestrator
+    ui.agent_switch(f"{category}_specialist", "OrchestratorAgent", reason="loop complete")
+
     new_status = "flag_captured" if flag_captured else "subagent_exhausted"
-    logger.info("[Orchestrator] Node complete. Status: %s", new_status)
+    ui.agent_done("OrchestratorAgent", summary=f"status={new_status}")
 
     return {
         "subagent_outputs": subagent_outputs,
-        "status": new_status,
+        "status":           new_status,
     }
 
 
-# ---------------------------------------------------------------------------
-# Utility — basic flag detection  (expand / replace as needed)
-# ---------------------------------------------------------------------------
+# ─── Utilities ───────────────────────────────────────────────────────────────
 
 def _coerce_to_text(value: Any) -> str:
-    """
-    Convert model/tool outputs into a plain text string.
-    Handles content-block lists produced by some chat models.
-    """
     if value is None:
         return ""
     if isinstance(value, str):
@@ -413,27 +389,17 @@ def _coerce_to_text(value: Any) -> str:
                 parts.append(item)
             elif isinstance(item, dict):
                 text = item.get("text")
-                if isinstance(text, str) and text:
-                    parts.append(text)
-                else:
-                    parts.append(json.dumps(item, ensure_ascii=False))
+                parts.append(text if isinstance(text, str) and text else json.dumps(item, ensure_ascii=False))
             else:
                 parts.append(str(item))
-        return "\n".join(part for part in parts if part)
+        return "\n".join(p for p in parts if p)
     if isinstance(value, dict):
         text = value.get("text") if "text" in value else None
-        if isinstance(text, str):
-            return text
-        return json.dumps(value, ensure_ascii=False)
+        return text if isinstance(text, str) else json.dumps(value, ensure_ascii=False)
     return str(value)
 
 
 def _check_flag_captured(output: Any) -> bool:
-    """
-    Returns True if the output looks like a flag was found.
-    Common CTF flag formats: FLAG{...}, HTB{...}, picoCTF{...}, etc.
-    """
-    import re
     flag_patterns = [
         r"FLAG\{[^}]+\}",
         r"HTB\{[^}]+\}",
@@ -442,7 +408,4 @@ def _check_flag_captured(output: Any) -> bool:
         r"flag\{[^}]+\}",
     ]
     output_text = _coerce_to_text(output)
-    for pattern in flag_patterns:
-        if re.search(pattern, output_text, re.IGNORECASE):
-            return True
-    return False
+    return any(re.search(p, output_text, re.IGNORECASE) for p in flag_patterns)
