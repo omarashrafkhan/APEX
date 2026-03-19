@@ -125,7 +125,7 @@ def run_interactive_cli(runner_fn) -> None:
                 else str(latest_output)
             )
             ui.nested_panel(
-                content=latest_text[:2000] + ("..." if len(latest_text) > 2000 else ""),
+                content=latest_text,
                 outer_title="Latest Sub-Agent Output",
                 inner_title=latest_key,
                 outer_style="accent",
